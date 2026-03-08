@@ -6,6 +6,8 @@ const PORT = process.env.PORT || 3000;
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS || '*';
 const SHOPIFY_TOKEN = process.env.SHOPIFY_TOKEN;
 const SHOPIFY_DOMAIN = process.env.SHOPIFY_DOMAIN;
+const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
+const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
 
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', ALLOWED_ORIGINS);
@@ -15,113 +17,59 @@ app.use((req, res, next) => {
   next();
 });
 
-// Endpoint usando GraphQL Admin API (compatible con shpss_)
-app.get('/checkouts', async (req, res) => {
+app.get('/auth', (req, res) => {
+  const redirectUri = `https://${req.headers.host}/callback`;
+  const scopes = 'read_checkouts,read_customers,read_orders';
+  const authUrl = `https://${SHOPIFY_DOMAIN}/admin/oauth/authorize?client_id=${SHOPIFY_API_KEY}&scope=${scopes}&redirect_uri=${redirectUri}`;
+  res.redirect(authUrl);
+});
+
+app.get('/callback', async (req, res) => {
+  const { code, shop } = req.query;
+  if (!code) return res.status(400).json({ error: 'No code recibido' });
   try {
-    if (!SHOPIFY_TOKEN || !SHOPIFY_DOMAIN) {
-      return res.status(500).json({ error: 'Faltan variables de entorno SHOPIFY_TOKEN y SHOPIFY_DOMAIN' });
-    }
-
-    const fromDate = req.query.created_at_min || new Date(Date.now() - 30*24*60*60*1000).toISOString();
-    const toDate = req.query.created_at_max || new Date().toISOString();
-
-    // Usamos GraphQL que sí acepta el token shpss_
-    const query = `{
-      abandonedCheckouts(first: 250, query: "created_at:>=${fromDate.split('T')[0]} created_at:<=${toDate.split('T')[0]}") {
-        edges {
-          node {
-            id
-            token
-            email
-            createdAt
-            totalPriceSet { shopMoney { amount currencyCode } }
-            billingAddress { firstName lastName phone }
-            shippingAddress { firstName lastName phone }
-            lineItems(first: 20) {
-              edges {
-                node {
-                  title
-                  quantity
-                  originalUnitPriceSet { shopMoney { amount } }
-                }
-              }
-            }
-          }
-        }
-      }
-    }`;
-
-    const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/graphql.json`, {
+    const response = await fetch(`https://${shop}/admin/oauth/access_token`, {
       method: 'POST',
-      headers: {
-        'X-Shopify-Access-Token': SHOPIFY_TOKEN,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ query })
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: SHOPIFY_API_KEY, client_secret: SHOPIFY_API_SECRET, code })
     });
-
-    if (!response.ok) {
-      const text = await response.text();
-      return res.status(response.status).json({ error: text });
-    }
-
     const data = await response.json();
-
-    if (data.errors) {
-      // Si falla GraphQL, intentamos con REST como fallback
-      return fetchREST(req, res);
+    if (data.access_token) {
+      res.send(`<html><head><style>body{font-family:monospace;background:#0a0a0f;color:#e8e8f4;padding:40px;max-width:600px;margin:0 auto}h2{color:#5bf4c2}.token{background:#1a1a26;border:1px solid #5b5ef4;border-radius:8px;padding:16px;font-size:14px;word-break:break-all;color:#5b5ef4;margin:16px 0}p{color:#8888aa;line-height:1.6}</style></head><body><h2>✅ Token obtenido</h2><p>Copia este token y ponlo en Railway como <strong>SHOPIFY_TOKEN</strong>:</p><div class="token">${data.access_token}</div><p>1. Copia el token<br>2. Railway → Variables → edita SHOPIFY_TOKEN<br>3. Pega y guarda<br>4. ¡Listo!</p></body></html>`);
+    } else {
+      res.status(400).json({ error: 'No se pudo obtener token', details: data });
     }
-
-    // Transformar respuesta GraphQL al formato que espera el dashboard
-    const checkouts = (data.data?.abandonedCheckouts?.edges || []).map(({ node: c }) => {
-      const billing = c.billingAddress || c.shippingAddress || {};
-      const phone = billing.phone || '';
-      const name = `${billing.firstName || ''} ${billing.lastName || ''}`.trim();
-      return {
-        token: c.token || c.id,
-        id: c.token || c.id,
-        email: c.email || '',
-        total_price: c.totalPriceSet?.shopMoney?.amount || '0',
-        created_at: c.createdAt,
-        billing_address: { first_name: billing.firstName, last_name: billing.lastName, phone },
-        line_items: (c.lineItems?.edges || []).map(({ node: p }) => ({
-          title: p.title,
-          quantity: p.quantity,
-          price: p.originalUnitPriceSet?.shopMoney?.amount || '0'
-        }))
-      };
-    });
-
-    res.json({ checkouts });
-
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Fallback REST
-async function fetchREST(req, res) {
-  const params = new URLSearchParams();
-  params.set('status', 'open');
-  params.set('limit', '250');
-  if (req.query.created_at_min) params.set('created_at_min', req.query.created_at_min);
-  if (req.query.created_at_max) params.set('created_at_max', req.query.created_at_max);
-
-  const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/checkouts.json?${params}`, {
-    headers: {
-      'X-Shopify-Access-Token': SHOPIFY_TOKEN,
-      'Content-Type': 'application/json'
+app.get('/checkouts', async (req, res) => {
+  try {
+    if (!SHOPIFY_TOKEN || !SHOPIFY_DOMAIN) {
+      return res.status(500).json({ error: 'Faltan variables de entorno SHOPIFY_TOKEN y SHOPIFY_DOMAIN' });
     }
-  });
-
-  const data = await response.json();
-  res.json(data);
-}
+    const params = new URLSearchParams();
+    params.set('status', 'open');
+    params.set('limit', '250');
+    if (req.query.created_at_min) params.set('created_at_min', req.query.created_at_min);
+    if (req.query.created_at_max) params.set('created_at_max', req.query.created_at_max);
+    const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/checkouts.json?${params}`, {
+      headers: { 'X-Shopify-Access-Token': SHOPIFY_TOKEN, 'Content-Type': 'application/json' }
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      return res.status(response.status).json({ error: text });
+    }
+    const data = await response.json();
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'Shopify Proxy activo ✅' });
 });
 
-app.listen(PORT, () => {
-  console.log(`Proxy corriendo en puerto ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Proxy corriendo en puerto ${PORT}`));
