@@ -44,25 +44,43 @@ app.get('/callback', async (req, res) => {
   }
 });
 
+// Trae TODOS los carritos paginando automáticamente
 app.get('/checkouts', async (req, res) => {
   try {
     if (!SHOPIFY_TOKEN || !SHOPIFY_DOMAIN) {
       return res.status(500).json({ error: 'Faltan variables de entorno SHOPIFY_TOKEN y SHOPIFY_DOMAIN' });
     }
-    const params = new URLSearchParams();
-    params.set('status', 'open');
-    params.set('limit', '250');
-    if (req.query.created_at_min) params.set('created_at_min', req.query.created_at_min);
-    if (req.query.created_at_max) params.set('created_at_max', req.query.created_at_max);
-    const response = await fetch(`https://${SHOPIFY_DOMAIN}/admin/api/2024-01/checkouts.json?${params}`, {
-      headers: { 'X-Shopify-Access-Token': SHOPIFY_TOKEN, 'Content-Type': 'application/json' }
-    });
-    if (!response.ok) {
-      const text = await response.text();
-      return res.status(response.status).json({ error: text });
+
+    let allCheckouts = [];
+    let url = `https://${SHOPIFY_DOMAIN}/admin/api/2024-01/checkouts.json?status=open&limit=250&order=created_at+desc`;
+    if (req.query.created_at_min) url += `&created_at_min=${req.query.created_at_min}`;
+    if (req.query.created_at_max) url += `&created_at_max=${req.query.created_at_max}`;
+
+    // Paginación automática — trae todas las páginas
+    while (url) {
+      const response = await fetch(url, {
+        headers: { 'X-Shopify-Access-Token': SHOPIFY_TOKEN, 'Content-Type': 'application/json' }
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        return res.status(response.status).json({ error: text });
+      }
+
+      const data = await response.json();
+      allCheckouts = allCheckouts.concat(data.checkouts || []);
+
+      // Verificar si hay siguiente página via Link header
+      const linkHeader = response.headers.get('link') || '';
+      const nextMatch = linkHeader.match(/<([^>]+)>;\s*rel="next"/);
+      url = nextMatch ? nextMatch[1] : null;
+
+      // Límite de seguridad: máximo 2000 carritos
+      if (allCheckouts.length >= 2000) break;
     }
-    const data = await response.json();
-    res.json(data);
+
+    res.json({ checkouts: allCheckouts, total: allCheckouts.length });
+
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
